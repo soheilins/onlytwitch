@@ -1,0 +1,25 @@
+name: Delete Folder
+
+on:
+  workflow_dispatch:
+    inputs:
+      folder_name:
+        description: 'Folder to delete'
+        required: true
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Delete folder
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git rm -r "${{ github.event.inputs.folder_name }}" || true
+          git commit -m "Delete ${{ github.event.inputs.folder_name }}" || echo "No changes"
+          git push
