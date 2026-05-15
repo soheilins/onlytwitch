@@ -2,14 +2,13 @@ name: Rubika – Spear Folder Watcher (6h runs, every 6h)
 
 on:
   schedule:
-    # Every 6 hours (adjust to your preferred schedule)
     - cron: '0 */6 * * *'
-  workflow_dispatch:   # manual trigger
+  workflow_dispatch:
 
 jobs:
   rubika-watcher:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # 6 hours max per run
+    timeout-minutes: 360
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,60 +25,59 @@ jobs:
 
           FOLDER="spear"
           WAIT_SECONDS=60
-          MAX_DURATION=21600   # 6 hours in seconds
+          MAX_DURATION=21600
 
           # ------------------------------------------------------------
-          # Upload file to Rubika – retry indefinitely on failure
-          # Returns file_id on success
+          # Upload file with retry – cleaned response handling
           # ------------------------------------------------------------
           upload_file_with_retry() {
             local file_path="$1"
             local file_type="File"
 
             while true; do
-              # 1. Request upload URL
+              # Request upload URL, strip BOM and carriage returns
               local upload_url_response
               upload_url_response=$(curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/requestSendFile" \
                 -H 'Content-Type: application/json' \
-                -d "{\"type\":\"$file_type\"}")
+                -d "{\"type\":\"$file_type\"}" | tr -d '\r' | sed 's/^\xEF\xBB\xBF//')
 
               local upload_url
-              upload_url=$(echo "$upload_url_response" | jq -r '.data.upload_url // empty')
+              upload_url=$(echo "$upload_url_response" | jq -r '.data.upload_url // empty' 2>/dev/null || echo "")
+              
               if [ -n "$upload_url" ]; then
-                # 2. Upload file to that URL
+                # Upload file
                 local upload_response
                 upload_response=$(curl -s -X POST "$upload_url" \
-                  -F "file=@$file_path")
-
+                  -F "file=@$file_path" | tr -d '\r' | sed 's/^\xEF\xBB\xBF//')
+                
                 local file_id
-                file_id=$(echo "$upload_response" | jq -r '.data.file_id // empty')
+                file_id=$(echo "$upload_response" | jq -r '.data.file_id // empty' 2>/dev/null || echo "")
                 if [ -n "$file_id" ]; then
                   echo "$file_id"
                   return 0
                 fi
               fi
-              # If we get here, retry immediately – no delay
+              # Retry immediately
             done
           }
 
           # ------------------------------------------------------------
-          # Send one file (upload + send) with retry on upload
+          # Send one file (upload + send)
           # ------------------------------------------------------------
           send_one_file() {
             local file_path="$1"
             echo "📤 Sending: $file_path"
             local file_id
             file_id=$(upload_file_with_retry "$file_path")
-            # Send using the obtained file_id
             curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/sendFile" \
               -H 'Content-Type: application/json' \
               -d "{\"chat_id\":\"$RUBIKA_CHAT_ID\",\"file_id\":\"$file_id\",\"text\":\"$(basename "$file_path")\"}"
             echo "  ✅ Sent."
-            sleep 1   # 1 second delay only after successful send
+            sleep 1
           }
 
           # ------------------------------------------------------------
-          # Wait until folder exists and has at least one file
+          # Wait for folder with files
           # ------------------------------------------------------------
           echo "⏳ Waiting for folder '$FOLDER' to appear (checking every $WAIT_SECONDS seconds)..."
           while true; do
@@ -98,7 +96,7 @@ jobs:
           done
 
           # ------------------------------------------------------------
-          # Send all files currently in the folder (fresh start)
+          # Send all existing files (fresh start)
           # ------------------------------------------------------------
           find "$FOLDER" -type f | sort | while read -r file; do
             send_one_file "$file"
@@ -112,11 +110,11 @@ jobs:
           SENT_LIST=$(mktemp)
           find "$FOLDER" -type f >> "$SENT_LIST"
 
-          echo "🔄 Now watching for new files (checking every $WAIT_SECONDS seconds, up to 6h)..."
+          echo "🔄 Watching for new files (checking every $WAIT_SECONDS seconds, up to 6h)..."
           while true; do
             ELAPSED=$(( SECONDS - START_TIME ))
             if [ $ELAPSED -ge $MAX_DURATION ]; then
-              echo "⏰ 6 hours reached – stopping. Next scheduled run will start soon."
+              echo "⏰ 6 hours reached – stopping."
               break
             fi
 
@@ -129,4 +127,4 @@ jobs:
             sleep "$WAIT_SECONDS"
           done
 
-          echo "🏁 Rubika watcher finished (cron will restart if 6h have passed)."
+          echo "🏁 Rubika watcher finished."
