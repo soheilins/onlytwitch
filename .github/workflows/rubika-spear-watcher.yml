@@ -1,0 +1,145 @@
+name: Rubika – Spear Folder Watcher (6h runs, every 6h)
+
+on:
+  schedule:
+    # Runs every 6 hours (adjust cron as needed)
+    - cron: '0 */6 * * *'
+  workflow_dispatch:   # also manual trigger
+
+jobs:
+  rubika-watcher:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # maximum 6 hours per run
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install jq (JSON parser)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Watch 'spear' folder and send files to Rubika
+        env:
+          RUBIKA_BOT_TOKEN: ${{ secrets.RUBIKA_BOT_TOKEN }}
+          RUBIKA_CHAT_ID: ${{ secrets.RUBIKA_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          FOLDER="spear"
+          WAIT_SECONDS=60
+          MAX_DURATION=21600   # 6 hours
+
+          # ------------------------------------------------------------
+          # Upload a file to Rubika and return file_id
+          # ------------------------------------------------------------
+          upload_file() {
+            local file_path="$1"
+            local file_type="File"
+            echo "  ⬆️ Uploading $(basename "$file_path") ..."
+
+            # Step 1: request upload URL
+            local upload_url_response
+            upload_url_response=$(curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/requestSendFile" \
+              -H 'Content-Type: application/json' \
+              -d "{\"type\":\"$file_type\"}")
+
+            local upload_url
+            upload_url=$(echo "$upload_url_response" | jq -r '.data.upload_url // empty')
+            if [ -z "$upload_url" ]; then
+              echo "  ❌ Failed to get upload URL. Response: $upload_url_response"
+              return 1
+            fi
+
+            # Step 2: upload file to that URL
+            local upload_response
+            upload_response=$(curl -s -X POST "$upload_url" \
+              -F "file=@$file_path")
+
+            local file_id
+            file_id=$(echo "$upload_response" | jq -r '.data.file_id // empty')
+            if [ -z "$file_id" ]; then
+              echo "  ❌ Upload failed. Response: $upload_response"
+              return 1
+            fi
+
+            echo "$file_id"
+          }
+
+          # ------------------------------------------------------------
+          # Send a file (by file_id) to the chat
+          # ------------------------------------------------------------
+          send_file_by_id() {
+            local file_id="$1"
+            local caption="$2"
+            curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/sendFile" \
+              -H 'Content-Type: application/json' \
+              -d "{\"chat_id\":\"$RUBIKA_CHAT_ID\",\"file_id\":\"$file_id\",\"text\":\"$caption\"}"
+          }
+
+          # ------------------------------------------------------------
+          # Send one file: upload + send
+          # ------------------------------------------------------------
+          send_one_file() {
+            local file_path="$1"
+            echo "📤 Sending: $file_path"
+            local file_id
+            if ! file_id=$(upload_file "$file_path"); then
+              echo "  ⚠️ Skipping $file_path"
+              return 1
+            fi
+            send_file_by_id "$file_id" "$(basename "$file_path")"
+            echo "  ✅ Sent."
+            sleep 1   # avoid rate limits
+          }
+
+          # ------------------------------------------------------------
+          # Wait until folder exists and contains files
+          # ------------------------------------------------------------
+          echo "⏳ Waiting for folder '$FOLDER' to appear (checking every $WAIT_SECONDS seconds)..."
+          while true; do
+            if [ -d "$FOLDER" ]; then
+              FILE_COUNT=$(find "$FOLDER" -type f | wc -l)
+              if [ "$FILE_COUNT" -gt 0 ]; then
+                echo "✅ Folder '$FOLDER' found with $FILE_COUNT file(s)."
+                break
+              else
+                echo "📁 Folder '$FOLDER' exists but is empty. Waiting..."
+              fi
+            else
+              echo "❌ Folder '$FOLDER' does not exist yet. Waiting..."
+            fi
+            sleep "$WAIT_SECONDS"
+          done
+
+          # ------------------------------------------------------------
+          # Send all files currently in the folder (fresh start)
+          # ------------------------------------------------------------
+          find "$FOLDER" -type f | sort | while read -r file; do
+            send_one_file "$file"
+          done
+          echo "✅ Initial files sent."
+
+          # ------------------------------------------------------------
+          # Continuous watch for new files (up to 6 hours)
+          # ------------------------------------------------------------
+          START_TIME=$SECONDS
+          SENT_LIST=$(mktemp)
+          find "$FOLDER" -type f >> "$SENT_LIST"
+
+          echo "🔄 Now watching for new files (checking every $WAIT_SECONDS seconds, up to 6h)..."
+          while true; do
+            ELAPSED=$(( SECONDS - START_TIME ))
+            if [ $ELAPSED -ge $MAX_DURATION ]; then
+              echo "⏰ 6 hours reached – stopping. Next scheduled run will start soon."
+              break
+            fi
+
+            find "$FOLDER" -type f | sort | while read -r file; do
+              if ! grep -Fxq "$file" "$SENT_LIST" 2>/dev/null; then
+                send_one_file "$file"
+                echo "$file" >> "$SENT_LIST"
+              fi
+            done
+            sleep "$WAIT_SECONDS"
+          done
+
+          echo "🏁 Rubika watcher finished (will be restarted by cron if 6h have passed)."
