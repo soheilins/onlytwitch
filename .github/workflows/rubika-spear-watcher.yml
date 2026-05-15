@@ -2,19 +2,19 @@ name: Rubika – Spear Folder Watcher (6h runs, every 6h)
 
 on:
   schedule:
-    # Runs every 6 hours (adjust cron as needed)
+    # Every 6 hours (adjust to your preferred schedule)
     - cron: '0 */6 * * *'
-  workflow_dispatch:   # also manual trigger
+  workflow_dispatch:   # manual trigger
 
 jobs:
   rubika-watcher:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # maximum 6 hours per run
+    timeout-minutes: 360   # 6 hours max per run
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install jq (JSON parser)
+      - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Watch 'spear' folder and send files to Rubika
@@ -26,73 +26,60 @@ jobs:
 
           FOLDER="spear"
           WAIT_SECONDS=60
-          MAX_DURATION=21600   # 6 hours
+          MAX_DURATION=21600   # 6 hours in seconds
 
           # ------------------------------------------------------------
-          # Upload a file to Rubika and return file_id
+          # Upload file to Rubika – retry indefinitely on failure
+          # Returns file_id on success
           # ------------------------------------------------------------
-          upload_file() {
+          upload_file_with_retry() {
             local file_path="$1"
             local file_type="File"
-            echo "  ⬆️ Uploading $(basename "$file_path") ..."
 
-            # Step 1: request upload URL
-            local upload_url_response
-            upload_url_response=$(curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/requestSendFile" \
-              -H 'Content-Type: application/json' \
-              -d "{\"type\":\"$file_type\"}")
+            while true; do
+              # 1. Request upload URL
+              local upload_url_response
+              upload_url_response=$(curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/requestSendFile" \
+                -H 'Content-Type: application/json' \
+                -d "{\"type\":\"$file_type\"}")
 
-            local upload_url
-            upload_url=$(echo "$upload_url_response" | jq -r '.data.upload_url // empty')
-            if [ -z "$upload_url" ]; then
-              echo "  ❌ Failed to get upload URL. Response: $upload_url_response"
-              return 1
-            fi
+              local upload_url
+              upload_url=$(echo "$upload_url_response" | jq -r '.data.upload_url // empty')
+              if [ -n "$upload_url" ]; then
+                # 2. Upload file to that URL
+                local upload_response
+                upload_response=$(curl -s -X POST "$upload_url" \
+                  -F "file=@$file_path")
 
-            # Step 2: upload file to that URL
-            local upload_response
-            upload_response=$(curl -s -X POST "$upload_url" \
-              -F "file=@$file_path")
-
-            local file_id
-            file_id=$(echo "$upload_response" | jq -r '.data.file_id // empty')
-            if [ -z "$file_id" ]; then
-              echo "  ❌ Upload failed. Response: $upload_response"
-              return 1
-            fi
-
-            echo "$file_id"
+                local file_id
+                file_id=$(echo "$upload_response" | jq -r '.data.file_id // empty')
+                if [ -n "$file_id" ]; then
+                  echo "$file_id"
+                  return 0
+                fi
+              fi
+              # If we get here, retry immediately – no delay
+            done
           }
 
           # ------------------------------------------------------------
-          # Send a file (by file_id) to the chat
-          # ------------------------------------------------------------
-          send_file_by_id() {
-            local file_id="$1"
-            local caption="$2"
-            curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/sendFile" \
-              -H 'Content-Type: application/json' \
-              -d "{\"chat_id\":\"$RUBIKA_CHAT_ID\",\"file_id\":\"$file_id\",\"text\":\"$caption\"}"
-          }
-
-          # ------------------------------------------------------------
-          # Send one file: upload + send
+          # Send one file (upload + send) with retry on upload
           # ------------------------------------------------------------
           send_one_file() {
             local file_path="$1"
             echo "📤 Sending: $file_path"
             local file_id
-            if ! file_id=$(upload_file "$file_path"); then
-              echo "  ⚠️ Skipping $file_path"
-              return 1
-            fi
-            send_file_by_id "$file_id" "$(basename "$file_path")"
+            file_id=$(upload_file_with_retry "$file_path")
+            # Send using the obtained file_id
+            curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/sendFile" \
+              -H 'Content-Type: application/json' \
+              -d "{\"chat_id\":\"$RUBIKA_CHAT_ID\",\"file_id\":\"$file_id\",\"text\":\"$(basename "$file_path")\"}"
             echo "  ✅ Sent."
-            sleep 1   # avoid rate limits
+            sleep 1   # 1 second delay only after successful send
           }
 
           # ------------------------------------------------------------
-          # Wait until folder exists and contains files
+          # Wait until folder exists and has at least one file
           # ------------------------------------------------------------
           echo "⏳ Waiting for folder '$FOLDER' to appear (checking every $WAIT_SECONDS seconds)..."
           while true; do
@@ -142,4 +129,4 @@ jobs:
             sleep "$WAIT_SECONDS"
           done
 
-          echo "🏁 Rubika watcher finished (will be restarted by cron if 6h have passed)."
+          echo "🏁 Rubika watcher finished (cron will restart if 6h have passed)."
