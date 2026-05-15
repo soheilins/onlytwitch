@@ -1,0 +1,86 @@
+name: Continuous Folder Watcher (6h)
+
+on:
+  workflow_dispatch:
+    inputs:
+      folder_path:
+        description: 'Folder to watch (relative to repo root)'
+        required: true
+        default: 'docs/'
+        type: string
+
+# Maximum workflow runtime: 6 hours (360 minutes)
+# GitHub will hard‑stop the job after this time
+jobs:
+  watch-and-send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # 6 hours
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Watch folder and send files to Telegram
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FOLDER: ${{ github.event.inputs.folder_path }}
+        run: |
+          # ------------------------------------------------------------
+          # Continuous monitoring for 6 hours, checking every 60 seconds
+          # ------------------------------------------------------------
+          set -euo pipefail
+
+          # Check if folder exists
+          if [ ! -d "$FOLDER" ]; then
+            echo "❌ Folder '$FOLDER' does not exist. Exiting."
+            exit 1
+          fi
+
+          # Temporary file to remember which files have been sent
+          SENT_LIST=$(mktemp)
+
+          # Helper: send a file and record it as sent
+          send_file() {
+            local file="$1"
+            echo "📤 Sending new file: $file"
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+              -F chat_id="${CHAT_ID}" \
+              -F document=@"$file" \
+              -F caption="$(basename "$file")"
+            echo "$file" >> "$SENT_LIST"
+            sleep 1   # avoid hitting rate limits
+          }
+
+          # Initial scan: send all files that exist right now
+          echo "🔍 Initial scan – sending all existing files in '$FOLDER' ..."
+          find "$FOLDER" -type f | sort | while read -r file; do
+            send_file "$file"
+          done
+          echo "✅ Initial files sent."
+
+          # Now enter the continuous watch loop (max 6 hours)
+          START_TIME=$SECONDS
+          MAX_DURATION=21600   # 6 hours in seconds
+
+          echo "🔄 Watching for new files (checking every 60 seconds, up to 6h) ..."
+
+          while true; do
+            # Check elapsed time
+            ELAPSED=$(( SECONDS - START_TIME ))
+            if [ $ELAPSED -ge $MAX_DURATION ]; then
+              echo "⏰ 6 hours reached – stopping."
+              break
+            fi
+
+            # Find all current files, but only those not yet sent
+            find "$FOLDER" -type f | sort | while read -r file; do
+              if ! grep -Fxq "$file" "$SENT_LIST" 2>/dev/null; then
+                send_file "$file"
+              fi
+            done
+
+            # Wait 60 seconds before next check
+            sleep 60
+          done
+
+          echo "🏁 Workflow finished. Sent files logged in temporary list (not stored permanently)."
