@@ -7,7 +7,7 @@ from pathlib import Path
 
 # ===== CONFIGURATION =====
 FOLDER = "spear"
-CHECK_INTERVAL = 60        # seconds between scans
+CHECK_INTERVAL = 60        # seconds between folder scans
 MAX_RUNTIME = 6 * 3600     # 6 hours
 # =========================
 
@@ -24,31 +24,28 @@ REQUEST_SEND_FILE_URL = f"{BASE_API}/requestSendFile"
 SEND_FILE_URL = f"{BASE_API}/sendFile"
 
 def send_text_message(text):
-    """Send a plain text message to the chat."""
+    """Send a plain text message (best effort)."""
     try:
-        resp = requests.post(SEND_MESSAGE_URL, json={"chat_id": CHAT_ID, "text": text}, timeout=10)
-        if resp.status_code == 200:
-            print(f"  📨 Text sent: {text[:50]}")
-        else:
-            print(f"  ⚠️ Text send failed: {resp.text[:100]}")
+        requests.post(SEND_MESSAGE_URL, json={"chat_id": CHAT_ID, "text": text}, timeout=10)
+        print(f"  📨 Text sent: {text[:50]}")
     except Exception as e:
         print(f"  ⚠️ Text send error: {e}")
 
 def upload_and_send_file(file_path):
-    """Upload a file to Rubika and send it. Returns True on success."""
+    """Upload a file to Rubika – retries forever until success."""
     filename = os.path.basename(file_path)
-    # First, send the filename as a separate text message
     send_text_message(f"📄 Sending: {filename}")
 
-    # Retry loop for upload
-    for attempt in range(10):   # max 10 attempts, then give up
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             # 1. Request upload URL
             resp = requests.post(REQUEST_SEND_FILE_URL, json={"type": "File"}, timeout=10)
             resp.raise_for_status()
             data = resp.json()
             if data.get("status") != "OK":
-                print(f"  ❌ requestSendFile error: {data}")
+                print(f"  ⚠️ requestSendFile error: {data} (attempt {attempt})")
                 time.sleep(2)
                 continue
             upload_url = data["data"]["upload_url"]
@@ -56,11 +53,11 @@ def upload_and_send_file(file_path):
             # 2. Upload file
             with open(file_path, 'rb') as f:
                 files = {"file": (filename, f, "application/octet-stream")}
-                upload_resp = requests.post(upload_url, files=files, timeout=30)
+                upload_resp = requests.post(upload_url, files=files, timeout=60)
                 upload_resp.raise_for_status()
                 upload_data = upload_resp.json()
                 if upload_data.get("status") != "OK":
-                    print(f"  ❌ Upload error: {upload_data}")
+                    print(f"  ❌ Upload error: {upload_data} (attempt {attempt})")
                     time.sleep(2)
                     continue
                 file_id = upload_data["data"]["file_id"]
@@ -73,15 +70,19 @@ def upload_and_send_file(file_path):
             }
             send_resp = requests.post(SEND_FILE_URL, json=send_payload, timeout=15)
             send_resp.raise_for_status()
-            print(f"  ✅ Sent {filename}")
+            print(f"  ✅ Sent {filename} after {attempt} attempt(s)")
             return True
 
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 502:
+                print(f"  ⚠️ 502 Bad Gateway (attempt {attempt}) – retrying in 5s...")
+                time.sleep(5)
+            else:
+                print(f"  ⚠️ HTTP error {e.response.status_code} (attempt {attempt}) – retrying in 2s...")
+                time.sleep(2)
         except Exception as e:
-            print(f"  ⚠️ Attempt {attempt+1} failed: {e}")
+            print(f"  ⚠️ Attempt {attempt} failed: {e} – retrying in 2s...")
             time.sleep(2)
-
-    print(f"  ❌ Giving up on {filename} after 10 attempts")
-    return False
 
 def main():
     print("=" * 50)
@@ -94,7 +95,7 @@ def main():
     start_time = time.time()
     sent_files = set()
 
-    # Wait for folder to exist and contain files
+    # Wait for folder to exist and have files
     while True:
         if os.path.isdir(FOLDER):
             files = [f for f in Path(FOLDER).iterdir() if f.is_file()]
@@ -107,13 +108,13 @@ def main():
             print(f"❌ Folder '{FOLDER}' does not exist. Waiting...")
         time.sleep(CHECK_INTERVAL)
 
-    # Send all files that exist now (fresh start – send everything)
+    # Send all existing files (fresh start – send everything)
     all_files = sorted(Path(FOLDER).iterdir(), key=lambda p: p.name)
     for file_path in all_files:
         if file_path.is_file():
-            if upload_and_send_file(str(file_path)):
-                sent_files.add(str(file_path))
-            time.sleep(1)   # small delay to avoid rate limits
+            upload_and_send_file(str(file_path))
+            sent_files.add(str(file_path))
+            time.sleep(1)   # brief pause after successful send
 
     print("✅ Initial files sent. Now watching for new files...")
 
@@ -122,8 +123,8 @@ def main():
         current_files = set(str(p) for p in Path(FOLDER).iterdir() if p.is_file())
         new_files = current_files - sent_files
         for file_path in sorted(new_files):
-            if upload_and_send_file(file_path):
-                sent_files.add(file_path)
+            upload_and_send_file(file_path)
+            sent_files.add(file_path)
             time.sleep(1)
         time.sleep(CHECK_INTERVAL)
 
