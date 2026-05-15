@@ -28,50 +28,87 @@ jobs:
           MAX_DURATION=21600
 
           # ------------------------------------------------------------
-          # Upload file with retry – cleaned response handling
+          # Helper: send a plain text message
+          # ------------------------------------------------------------
+          send_text() {
+            local text="$1"
+            curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/sendMessage" \
+              -H 'Content-Type: application/json' \
+              -d "{\"chat_id\":\"$RUBIKA_CHAT_ID\",\"text\":\"$text\"}"
+          }
+
+          # ------------------------------------------------------------
+          # Upload file with retry – logs each failure before retry
           # ------------------------------------------------------------
           upload_file_with_retry() {
             local file_path="$1"
             local file_type="File"
 
             while true; do
-              # Request upload URL, strip BOM and carriage returns
+              echo "  → Requesting upload URL..."
               local upload_url_response
-              upload_url_response=$(curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/requestSendFile" \
+              upload_url_response=$(curl -s --max-time 10 -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/requestSendFile" \
                 -H 'Content-Type: application/json' \
-                -d "{\"type\":\"$file_type\"}" | tr -d '\r' | sed 's/^\xEF\xBB\xBF//')
+                -d "{\"type\":\"$file_type\"}" 2>&1 | tr -d '\r' | sed 's/^\xEF\xBB\xBF//')
+
+              if [ $? -ne 0 ] || [ -z "$upload_url_response" ]; then
+                echo "  ⚠️ Upload URL request failed, retrying in 1s..."
+                sleep 1
+                continue
+              fi
 
               local upload_url
               upload_url=$(echo "$upload_url_response" | jq -r '.data.upload_url // empty' 2>/dev/null || echo "")
               
-              if [ -n "$upload_url" ]; then
-                # Upload file
-                local upload_response
-                upload_response=$(curl -s -X POST "$upload_url" \
-                  -F "file=@$file_path" | tr -d '\r' | sed 's/^\xEF\xBB\xBF//')
-                
-                local file_id
-                file_id=$(echo "$upload_response" | jq -r '.data.file_id // empty' 2>/dev/null || echo "")
-                if [ -n "$file_id" ]; then
-                  echo "$file_id"
-                  return 0
-                fi
+              if [ -z "$upload_url" ]; then
+                echo "  ⚠️ No upload_url in response, retrying in 1s..."
+                sleep 1
+                continue
               fi
-              # Retry immediately
+
+              echo "  → Uploading file to Rubika..."
+              local upload_response
+              upload_response=$(curl -s --max-time 30 -X POST "$upload_url" \
+                -F "file=@$file_path" 2>&1 | tr -d '\r' | sed 's/^\xEF\xBB\xBF//')
+              
+              if [ $? -ne 0 ] || [ -z "$upload_response" ]; then
+                echo "  ⚠️ File upload request failed, retrying in 1s..."
+                sleep 1
+                continue
+              fi
+
+              local file_id
+              file_id=$(echo "$upload_response" | jq -r '.data.file_id // empty' 2>/dev/null || echo "")
+              if [ -n "$file_id" ]; then
+                echo "$file_id"
+                return 0
+              else
+                echo "  ⚠️ No file_id in upload response, retrying in 1s..."
+                sleep 1
+              fi
             done
           }
 
           # ------------------------------------------------------------
-          # Send one file (upload + send)
+          # Send one file: first send its name as text, then upload+send
           # ------------------------------------------------------------
           send_one_file() {
             local file_path="$1"
-            echo "📤 Sending: $file_path"
+            local filename=$(basename "$file_path")
+            
+            # 1. Send the file name as a text message
+            echo "📝 Sending filename: $filename"
+            send_text "📄 Sending: $filename"
+            sleep 1   # brief pause to keep message order
+            
+            # 2. Upload and send the actual file
+            echo "📤 Uploading and sending: $file_path"
             local file_id
             file_id=$(upload_file_with_retry "$file_path")
+            echo "  → Sending file via sendFile..."
             curl -s -X POST "https://botapi.rubika.ir/v3/${RUBIKA_BOT_TOKEN}/sendFile" \
               -H 'Content-Type: application/json' \
-              -d "{\"chat_id\":\"$RUBIKA_CHAT_ID\",\"file_id\":\"$file_id\",\"text\":\"$(basename "$file_path")\"}"
+              -d "{\"chat_id\":\"$RUBIKA_CHAT_ID\",\"file_id\":\"$file_id\",\"text\":\"$filename\"}"
             echo "  ✅ Sent."
             sleep 1
           }
