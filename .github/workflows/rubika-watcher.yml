@@ -3,7 +3,7 @@ name: Rubika – Spear Folder Watcher (continuous)
 on:
   schedule:
     - cron: '0 */6 * * *'   # every 6 hours (starts a fresh runner)
-  workflow_dispatch:        # manual trigger
+  workflow_dispatch:
 
 jobs:
   watch-and-send:
