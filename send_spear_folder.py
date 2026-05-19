@@ -8,8 +8,7 @@ from pathlib import Path
 
 # ===== CONFIGURATION =====
 FOLDER = "spear"
-CHECK_INTERVAL = 60        # seconds between folder scans
-# No MAX_RUNTIME – runs until GitHub stops the job
+CHECK_INTERVAL = 10        # seconds between folder scans
 # =========================
 
 TOKEN = os.environ.get("RUBIKA_TOKEN")
@@ -46,12 +45,13 @@ def git_pull():
 def upload_and_send_file(file_path):
     """
     Upload a file to Rubika and send it with the filename as caption.
-    Retries up to 10 times per file, then skips.
+    Retries forever until success (infinite retries).
     """
     filename = os.path.basename(file_path)
-    MAX_ATTEMPTS = 10
+    attempt = 0
 
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    while True:
+        attempt += 1
         try:
             # 1. Request upload URL
             resp = requests.post(REQUEST_SEND_FILE_URL, json={"type": "File"}, timeout=10)
@@ -81,7 +81,7 @@ def upload_and_send_file(file_path):
             send_payload = {
                 "chat_id": CHAT_ID,
                 "file_id": file_id,
-                "text": filename   # caption = filename
+                "text": filename
             }
             send_resp = requests.post(SEND_FILE_URL, json=send_payload, timeout=15)
             send_resp.raise_for_status()
@@ -98,10 +98,6 @@ def upload_and_send_file(file_path):
         except Exception as e:
             print(f"  ⚠️ Attempt {attempt} failed: {e} – retrying in 2s...")
             time.sleep(2)
-
-    # If we get here, all attempts failed
-    print(f"❌ Failed to send {filename} after {MAX_ATTEMPTS} attempts. Skipping.")
-    return False
 
 def main():
     print("=" * 50)
