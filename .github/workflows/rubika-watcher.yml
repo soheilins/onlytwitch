@@ -1,14 +1,14 @@
-name: Rubika – Spear Folder Watcher (6h runs, every 6h)
+name: Rubika – Spear Folder Watcher (continuous)
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
+    - cron: '0 */6 * * *'   # every 6 hours (starts a fresh runner)
+  workflow_dispatch:        # manual trigger
 
 jobs:
   watch-and-send:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 360    # max 6 hours per run (GitHub limit)
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
