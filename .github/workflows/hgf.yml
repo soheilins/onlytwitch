@@ -1,0 +1,62 @@
+name: Download HLS Live Stream and Split into Chunks (Push Each Chunk)
+
+on:
+  workflow_dispatch:
+    inputs:
+      stream_url:
+        description: 'URL of the .m3u8 live stream'
+        required: true
+        type: string
+
+jobs:
+  download-and-split:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create timestamped folder name (MMDDHHMMSS)
+        id: timestamp
+        run: |
+          TS=$(date +'%m%d%H%M%S')
+          echo "folder_name=$TS" >> $GITHUB_OUTPUT
+          echo "Created folder: $TS"
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Download live stream to MP4
+        run: |
+          mkdir -p "${{ steps.timestamp.outputs.folder_name }}"
+          cd "${{ steps.timestamp.outputs.folder_name }}"
+          ffmpeg -y \
+            -reconnect 1 \
+            -reconnect_streamed 1 \
+            -reconnect_delay_max 5 \
+            -timeout 10000000 \
+            -i "${{ github.event.inputs.stream_url }}" \
+            -c copy \
+            -bsf:a aac_adtstoasc \
+            "video.mp4"
+
+      - name: Split MP4 into 95MB chunks and push each chunk individually
+        run: |
+          cd "${{ steps.timestamp.outputs.folder_name }}"
+          mkdir -p chunks
+          split -b 95M video.mp4 chunks/chunk_
+          rm video.mp4
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Commit and push each chunk one by one
+          for chunk in chunks/chunk_*; do
+            git add "$chunk"
+            git commit -m "Add $(basename $chunk) from HLS stream"
+            git push
+          done
